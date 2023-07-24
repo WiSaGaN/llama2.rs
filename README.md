@@ -1,5 +1,15 @@
 
-## llama2.c
+## llama2.rs
+
+This is a single file llama2 inference model in Rust. It is a direct translation from llama2.c. It is not production ready, and just for fun. To use follow the original guide below. Just replace the C compiling with rustc compiling below:
+
+```bash
+rustc -C opt-level=3 -C target-cpu=native run.rs
+```
+
+And follow other instructions unchanged.
+
+Below is the original llama2.c readme.
 
 Have you ever wanted to inference a baby [Llama 2](https://ai.meta.com/llama/) model in pure C? No? Well, now you can!
 
