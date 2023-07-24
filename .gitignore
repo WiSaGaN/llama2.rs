@@ -1,0 +1,5 @@
+/out
+/.venv
+/run
+/__pycache__
+/target
