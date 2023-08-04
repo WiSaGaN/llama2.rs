@@ -14,6 +14,31 @@ struct Config {
     seq_len: i32, // max sequence length
 }
 
+#[derive(Copy, Clone, Debug)]
+struct ConfigUsize {
+    dim: usize, // transformer dimension
+    hidden_dim: usize, // for ffn layers
+    n_layers: usize, // number of layers
+    n_heads: usize, // number of query heads
+    n_kv_heads: usize, // number of key/value heads (can be < query heads because of multiquery)
+    vocab_size: usize, // vocabulary size, usually 256 (byte-level)
+    seq_len: usize, // max sequence length
+}
+
+impl From<Config> for ConfigUsize {
+    fn from(c: Config) -> Self {
+        ConfigUsize {
+            dim: c.dim as usize,
+            hidden_dim: c.hidden_dim as usize,
+            n_layers: c.n_layers as usize,
+            n_heads: c.n_heads as usize,
+            n_kv_heads: c.n_kv_heads as usize,
+            vocab_size: c.vocab_size as usize,
+            seq_len: c.seq_len as usize,
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 struct TransformerWeights {
     // token embedding table
@@ -37,8 +62,7 @@ struct TransformerWeights {
     freq_cis_imag: Vec<f32>, // (seq_len, dim/2)
 }
 
-fn read_into<T: Copy>(buffer: &mut Vec<T>, reader: &mut dyn Read, size: i32) -> Result<(), std::io::Error> {
-    let size = size as usize;
+fn read_into<T: Copy>(buffer: &mut Vec<T>, reader: &mut dyn Read, size: usize) -> Result<(), std::io::Error> {
     buffer.reserve(size);
     unsafe {
         let ptr = buffer.as_mut_ptr();
@@ -50,7 +74,7 @@ fn read_into<T: Copy>(buffer: &mut Vec<T>, reader: &mut dyn Read, size: i32) -> 
 }
 
 impl TransformerWeights {
-    pub fn checkpoint_init_weights(file: &mut dyn Read, config: &Config) -> Result<Self, std::io::Error> {
+    pub fn checkpoint_init_weights(file: &mut dyn Read, config: &ConfigUsize) -> Result<Self, std::io::Error> {
         let mut weights = Self::default();
         read_into(&mut weights.token_embedding_table, file, config.vocab_size * config.dim)?;
         read_into(&mut weights.rms_att_weight, file, config.n_layers * config.dim)?;
@@ -64,16 +88,16 @@ impl TransformerWeights {
         read_into(&mut weights.w3, file, config.n_layers * config.hidden_dim * config.dim)?;
         read_into(&mut weights.rms_final_weight, file, config.dim)?;
         let head_size = config.dim / config.n_heads;
-        weights.freq_cis_real = vec![0.0; (config.seq_len * config.dim / 2) as usize];
+        weights.freq_cis_real = vec![0.0; config.seq_len * config.dim / 2];
         unsafe {
             let ptr = weights.freq_cis_real.as_mut_ptr();
-            let byte_buffer = std::slice::from_raw_parts_mut(ptr as *mut u8, (config.seq_len * head_size / 2) as usize * std::mem::size_of::<f32>());
+            let byte_buffer = std::slice::from_raw_parts_mut(ptr as *mut u8, (config.seq_len * head_size / 2) * std::mem::size_of::<f32>());
             file.read_exact(byte_buffer)?;
         }
-        weights.freq_cis_imag = vec![0.0; (config.seq_len * config.dim / 2) as usize];
+        weights.freq_cis_imag = vec![0.0; config.seq_len * config.dim / 2];
         unsafe {
             let ptr = weights.freq_cis_imag.as_mut_ptr();
-            let byte_buffer = std::slice::from_raw_parts_mut(ptr as *mut u8, (config.seq_len * head_size / 2) as usize * std::mem::size_of::<f32>());
+            let byte_buffer = std::slice::from_raw_parts_mut(ptr as *mut u8, (config.seq_len * head_size / 2) * std::mem::size_of::<f32>());
             file.read_exact(byte_buffer)?;
         }
         Ok(weights)
@@ -98,19 +122,19 @@ struct RunState {
 }
 
 impl RunState {
-    pub fn new(config: &Config) -> Self {
-        let x = vec![0.0; config.dim as usize];
-        let xb = vec![0.0; config.dim as usize];
-        let xb2 = vec![0.0; config.dim as usize];
-        let hb = vec![0.0; config.hidden_dim as usize];
-        let hb2 = vec![0.0; config.hidden_dim as usize];
-        let q = vec![0.0; config.dim as usize];
-        let k = vec![0.0; config.dim as usize];
-        let v = vec![0.0; config.dim as usize];
-        let att = vec![0.0; config.seq_len as usize];
-        let logits = vec![0.0; config.vocab_size as usize];
-        let key_cache = vec![0.0; (config.n_layers * config.seq_len * config.dim) as usize];
-        let value_cache = vec![0.0; (config.n_layers * config.seq_len * config.dim) as usize];
+    pub fn new(config: &ConfigUsize) -> Self {
+        let x = vec![0.0; config.dim];
+        let xb = vec![0.0; config.dim];
+        let xb2 = vec![0.0; config.dim];
+        let hb = vec![0.0; config.hidden_dim];
+        let hb2 = vec![0.0; config.hidden_dim];
+        let q = vec![0.0; config.dim];
+        let k = vec![0.0; config.dim];
+        let v = vec![0.0; config.dim];
+        let att = vec![0.0; config.seq_len];
+        let logits = vec![0.0; config.vocab_size];
+        let key_cache = vec![0.0; config.n_layers * config.seq_len * config.dim];
+        let value_cache = vec![0.0; config.n_layers * config.seq_len * config.dim];
         RunState {
             x,
             xb,
@@ -128,23 +152,23 @@ impl RunState {
     }
 }
 
-fn accum(a: &mut[f32], b: &[f32], size: i32) {
-    for i in 0..size as usize {
+fn accum(a: &mut[f32], b: &[f32], size: usize) {
+    for i in 0..size {
         a[i] += b[i]
     }
 }
 
-fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: i32) {
+fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
     // calculate sum of squares
     let mut ss = 0.0;
-    for j in 0..size as usize {
+    for j in 0..size {
         ss += x[j] * x[j];
     }
     ss /= size as f32;
     ss += 1e-5;
     ss = 1.0 / ss.sqrt();
     // normalize and scale
-    for j in 0..size as usize {
+    for j in 0..size {
         o[j] = weight[j] * (ss * x[j]);
     }
 }
@@ -161,56 +185,57 @@ fn softmax(x: &mut [f32]) {
     x.iter_mut().for_each(|v| *v = (*v - max_val).exp());
     // normalize
     let sum: f32 = x.iter().copied().sum();
-    x.into_iter().for_each(|v| *v /= sum);
+    x.iter_mut().for_each(|v| *v /= sum);
     assert!(x.iter().copied().sum::<f32>() < 1.01);
     assert!(x.iter().copied().sum::<f32>() > 0.99);
 }
 
-fn matmul(xout: &mut [f32], x: &[f32], w: &[f32], n: i32, d: i32) {
+fn matmul(xout: &mut [f32], x: &[f32], w: &[f32], n: usize, d: usize) {
     // W (d,n) @ x (n,) -> xout (d,)
-    assert!(x.len() >= n as usize);
-    assert!(w.len() >= (d * n) as usize);
-    for i in 0..d as usize {
+    assert!(x.len() >= n);
+    assert!(w.len() >= d * n);
+    for i in 0..d {
         let mut val = 0.0;
-        for j in 0..n as usize {
-            val += w[i * n as usize + j] * x[j];
+        for j in 0..n {
+            val += w[i * n + j] * x[j];
         }
         xout[i] = val;
     }
 }
 
-fn transformer(token: i32, pos: i32, p: &Config, s: &mut RunState, w: &TransformerWeights) {
+fn transformer(token: i32, pos: usize, p: &ConfigUsize, s: &mut RunState, w: &TransformerWeights) {
     // a few convenice variables
-    let mut x = &mut s.x;
+    let x = &mut s.x;
+    let token = token as usize;
     let dim = p.dim;
     let hidden_dim = p.hidden_dim;
     let head_size = dim / p.n_heads;
 
     // copy the token embedding into x
-    let content_row = &w.token_embedding_table[(token * dim) as usize..(token * dim + dim) as usize];
+    let content_row = &w.token_embedding_table[token * dim..token * dim + dim];
     x.copy_from_slice(content_row);
 
     // pluck out the "pos" row of freq_cis_real and freq_cis_imag
-    let freq_cis_real_row = &w.freq_cis_real[(pos * head_size / 2) as usize..];
-    let freq_cis_imag_row = &w.freq_cis_imag[(pos * head_size / 2) as usize..];
+    let freq_cis_real_row = &w.freq_cis_real[(pos * head_size / 2)..];
+    let freq_cis_imag_row = &w.freq_cis_imag[(pos * head_size / 2)..];
 
     // forward all the layers
     for l in 0..p.n_layers {
         // attention rmsnorm
-        rmsnorm(&mut s.xb, x, &w.rms_att_weight[(l*dim) as usize..], dim);
+        rmsnorm(&mut s.xb, x, &w.rms_att_weight[l*dim..], dim);
 
         // qkv matmuls for this position
-        matmul(&mut s.q, &s.xb, &w.wq[(l*dim*dim) as usize..], dim, dim);
-        matmul(&mut s.k, &s.xb, &w.wk[(l*dim*dim) as usize..], dim, dim);
-        matmul(&mut s.v, &s.xb, &w.wv[(l*dim*dim) as usize..], dim, dim);
+        matmul(&mut s.q, &s.xb, &w.wq[l*dim*dim..], dim, dim);
+        matmul(&mut s.k, &s.xb, &w.wk[l*dim*dim..], dim, dim);
+        matmul(&mut s.v, &s.xb, &w.wv[l*dim*dim..], dim, dim);
 
         // apply RoPE rotation to the q and k vectors for each head
         for h in 0..p.n_heads {
             // get the q and k vectors for this head
-            let q = &mut s.q[(h * head_size) as usize..(h * head_size + head_size) as usize];
-            let k = &mut s.k[(h * head_size) as usize..(h * head_size + head_size) as usize];
+            let q = &mut s.q[h * head_size..h * head_size + head_size];
+            let k = &mut s.k[h * head_size..h * head_size + head_size];
             // rotate q and k by the freq_cis_real and freq_cis_imag
-            for i in (0..head_size as usize).step_by(2) {
+            for i in (0..head_size).step_by(2) {
                 let q0 = q[i];
                 let q1 = q[i + 1];
                 let k0 = k[i];
@@ -225,71 +250,71 @@ fn transformer(token: i32, pos: i32, p: &Config, s: &mut RunState, w: &Transform
         }
         // save key,value at this time step (pos) to our kv cache
         let loff = l * p.seq_len * dim; // kv cache layer offset for convenience
-        let key_cache_row = &mut s.key_cache[(loff + pos * dim) as usize..];
-        let value_cache_row = &mut s.value_cache[(loff + pos * dim) as usize..];
-        key_cache_row[..dim as usize].copy_from_slice(&s.k[..dim as usize]);
-        value_cache_row[..dim as usize].copy_from_slice(&s.v[..dim as usize]);
+        let key_cache_row = &mut s.key_cache[(loff + pos * dim)..];
+        let value_cache_row = &mut s.value_cache[(loff + pos * dim)..];
+        key_cache_row[..dim].copy_from_slice(&s.k[..dim]);
+        value_cache_row[..dim].copy_from_slice(&s.v[..dim]);
 
         // multihead attention. iterate over all heads
         for h in 0..p.n_heads {
             // get the query vector for this head
-            let q = &s.q[(h * head_size) as usize..];
+            let q = &s.q[(h * head_size)..];
             // iterate over all timesteps, including the current one
             for t in 0..pos + 1 {
                 // get the key vector for this head and at this timestep
-                let k = &s.key_cache[(loff + t * dim + h * head_size) as usize..];
+                let k = &s.key_cache[(loff + t * dim + h * head_size)..];
                 // calculate the attention score as the dot product of q and k
                 let mut score = 0.0;
-                for i in 0..head_size as usize {
+                for i in 0..head_size {
                     score += q[i] * k[i];
                 }
                 score /= (head_size as f32).sqrt();
                 // save the score to the attention buffer
-                s.att[t as usize] = score;
+                s.att[t] = score;
             }
 
             // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(&mut s.att[..pos as usize + 1]);
+            softmax(&mut s.att[..pos + 1]);
 
             // weighted sum of the values, store back into xb
-            for i in 0..head_size as usize {
+            for i in 0..head_size {
                 let mut val = 0.0;
                 for t in 0..pos + 1 {
-                    val += s.att[t as usize] * s.value_cache[(loff + t * dim + h * head_size) as usize + i]; // note bad locality
+                    val += s.att[t] * s.value_cache[(loff + t * dim + h * head_size) + i]; // note bad locality
                 }
-                s.xb[(h * head_size) as usize + i] = val;
+                s.xb[(h * head_size) + i] = val;
             }
         }
 
         // final matmul to get the output of the attention
-        matmul(&mut s.xb2, &s.xb, &w.wo[(l*dim*dim) as usize..], dim, dim);
+        matmul(&mut s.xb2, &s.xb, &w.wo[(l*dim*dim)..], dim, dim);
 
         // residual connection back into x
-        accum(&mut x, &s.xb2, dim);
+        accum(x, &s.xb2, dim);
 
         // ffn rmsnorm
-        rmsnorm(&mut s.xb, x, &w.rms_ffn_weight[(l*dim) as usize..], dim);
+        rmsnorm(&mut s.xb, x, &w.rms_ffn_weight[(l*dim)..], dim);
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(&mut s.hb, &s.xb, &w.w1[(l*dim*hidden_dim) as usize..], dim, hidden_dim);
-        matmul(&mut s.hb2, &s.xb, &w.w3[(l*dim*hidden_dim) as usize..], dim, hidden_dim);
+        matmul(&mut s.hb, &s.xb, &w.w1[(l*dim*hidden_dim)..], dim, hidden_dim);
+        matmul(&mut s.hb2, &s.xb, &w.w3[(l*dim*hidden_dim)..], dim, hidden_dim);
 
         // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
-        for i in 0..hidden_dim as usize {
-            s.hb[i] = s.hb[i] * (1.0 / (1.0 + (-s.hb[i]).exp()));
+        for i in 0..hidden_dim {
+            s.hb[i] *= 1.0 / (1.0 + (-s.hb[i]).exp());
         }
 
         // elementwise multiply with w3(x)
-        for i in 0..hidden_dim as usize {
-            s.hb[i] = s.hb[i] * s.hb2[i];
+        for i in 0..hidden_dim {
+            s.hb[i] *= s.hb2[i];
         }
 
         // final matmul to get the output of the ffn
-        matmul(&mut s.xb, &s.hb, &w.w2[(l*dim*hidden_dim) as usize..], hidden_dim, dim);
+        matmul(&mut s.xb, &s.hb, &w.w2[(l*dim*hidden_dim)..], hidden_dim, dim);
 
         // residual connection
-        accum(&mut x, &s.xb, dim);
+        accum(x, &s.xb, dim);
     }
 
     // final rmsnorm
@@ -359,12 +384,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut file = std::fs::File::open(checkpoint)?;
 
-    let config = unsafe {
+    let config: Config = unsafe {
         let mut config = MaybeUninit::uninit();
         let buffer = std::slice::from_raw_parts_mut(config.as_mut_ptr() as *mut u8, std::mem::size_of::<Config>());
         file.read_exact(buffer)?;
         config.assume_init()
     };
+    let config: ConfigUsize = ConfigUsize::from(config);
 
     let weights = TransformerWeights::checkpoint_init_weights(&mut file, &config)?;
     let mut state = RunState::new(&config);
@@ -385,7 +411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(0) as i32;
         } else {
             // apply the temperature to the logits
-            for q in 0..config.vocab_size as usize {
+            for q in 0..config.vocab_size {
                 state.logits[q] /= temperature;
             }
             // apply softmax to the logits to get the probabilities for next token
